@@ -13,7 +13,6 @@ import {
   CardTitle,
   CardDescription,
   CardContent,
-  CardFooter,
   CardAction,
 } from '@/components/ui/card'
 import {
@@ -23,21 +22,73 @@ import {
   TableRow,
   TableHead,
   TableCell,
-  TableCaption,
 } from '@/components/ui/table'
+
+// Quick type definitions for the new tables
+interface ShiftTemplate {
+  id: string
+  name: string
+  start_time: string
+  end_time: string
+}
 
 export default function ManagerPage() {
   const router = useRouter()
   const { profile, loading } = useRequireRole('manager')
+
+  const [newShiftName, setNewShiftName] = useState('')
+  const [startTime, setStartTime] = useState('09:00')
+  const [endTime, setEndTime] = useState('17:00')
+  
   const [employees, setEmployees] = useState<Profile[]>([])
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([])
   const [attendance, setAttendance] = useState<Attendance[]>([])
+  
+  // New State for Shifts
+  const [shifts, setShifts] = useState<ShiftTemplate[]>([])
+  const [selectedDate, setSelectedDate] = useState<string>(
+    new Date().toISOString().split('T')[0] // Defaults to today
+  )
+  const [assignmentStatus, setAssignmentStatus] = useState<string | null>(null)
 
   useEffect(() => {
-    if (profile) loadData(profile.id)
+    if (profile) loadData(profile.id, profile.branch_id)
   }, [profile])
 
-  async function loadData(managerId: string) {
+  async function handleCreateShift(e: React.FormEvent) {
+  e.preventDefault()
+  if (!profile?.branch_id || !newShiftName) return
+
+  // Database expects TIME format: "HH:MM:SS"
+  const formattedStart = `${startTime}:00`
+  const formattedEnd = `${endTime}:00`
+
+  const { error } = await supabase.from('shifts').insert({
+    branch_id: profile.branch_id,
+    name: newShiftName,
+    start_time: formattedStart,
+    end_time: formattedEnd,
+  })
+
+  if (error) {
+    alert(`Failed to create shift: ${error.message}`)
+  } else {
+    setNewShiftName('') // Reset form
+    loadData(profile.id, profile.branch_id) // Refresh shift list dropdown
+  }
+}
+
+  async function loadData(managerId: string, branchId: string | null) {
+    // 1. Grab templates available for this branch
+    let shiftTemplates: ShiftTemplate[] = []
+    if (branchId) {
+      const { data: sData } = await supabase
+        .from('shifts')
+        .select('id, name, start_time, end_time')
+        .eq('branch_id', branchId)
+      shiftTemplates = sData ?? []
+    }
+
     const [{ data: emp }, { data: leave }, { data: att }] = await Promise.all([
       supabase.from('profiles').select('*').eq('manager_id', managerId),
       supabase
@@ -47,9 +98,34 @@ export default function ManagerPage() {
         .order('created_at', { ascending: false }),
       supabase.from('attendance').select('*').order('check_in', { ascending: false }).limit(20),
     ])
+
+    setShifts(shiftTemplates)
     setEmployees(emp ?? [])
     setLeaveRequests(leave ?? [])
     setAttendance(att ?? [])
+  }
+
+  async function assignShift(employeeId: string, shiftId: string) {
+    if (!shiftId) return
+    setAssignmentStatus(null)
+
+    // Upsert assignment (if they already have a shift today, overwrite it)
+    const { error } = await supabase.from('shift_assignments').upsert(
+      {
+        employee_id: employeeId,
+        shift_id: shiftId,
+        date: selectedDate,
+      },
+      { onConflict: 'employee_id,date' }
+    )
+
+    if (error) {
+      setAssignmentStatus(`Error: ${error.message}`)
+    } else {
+      setAssignmentStatus('Shift assigned successfully!')
+      // Clear status message after 3 seconds
+      setTimeout(() => setAssignmentStatus(null), 3000)
+    }
   }
 
   async function decide(id: string, status: 'approved' | 'rejected') {
@@ -58,7 +134,7 @@ export default function ManagerPage() {
       .from('leave_requests')
       .update({ status, decided_at: new Date().toISOString() })
       .eq('id', id)
-    loadData(profile.id)
+    loadData(profile.id, profile.branch_id)
   }
 
   async function logout() {
@@ -71,6 +147,23 @@ export default function ManagerPage() {
   function employeeName(id: string) {
     return employees.find((e) => e.id === id)?.full_name ?? id
   }
+
+  // Put this function inside your ManagerPage component
+async function updateEmployeeDefaultShift(employeeId: string, shiftId: string) {
+  if (!profile) return
+
+  const { error } = await supabase
+    .from('profiles')
+    .update({ shift_id: shiftId })
+    .eq('id', employeeId)
+
+  if (error) {
+    alert(`Failed to update shift: ${error.message}`)
+  } else {
+    // Refresh the local state data
+    loadData(profile.id, profile.branch_id)
+  }
+}
 
   return (
     <main className="max-w-3xl mx-auto my-10 px-4 space-y-6">
@@ -88,22 +181,115 @@ export default function ManagerPage() {
         </CardContent>
       </Card>
 
+      
+
+      {/* Create Shift Template Form */}
+<section>
+  <Card>
+    <CardHeader>
+      <CardTitle>Create Shift Templates</CardTitle>
+      <CardDescription>Define standard working hours for your branch</CardDescription>
+    </CardHeader>
+    <CardContent>
+      <form onSubmit={handleCreateShift} className="flex flex-wrap gap-4 items-end">
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold">Shift Name</label>
+          <input
+            type="text"
+            placeholder="e.g., Night Shift"
+            value={newShiftName}
+            onChange={(e) => setNewShiftName(e.target.value)}
+            className="border p-2 rounded text-sm bg-background text-foreground w-48"
+            required
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold">Start Time</label>
+          <input
+            type="time"
+            value={startTime}
+            onChange={(e) => setStartTime(e.target.value)}
+            className="border p-2 rounded text-sm bg-background text-foreground"
+            required
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold">End Time</label>
+          <input
+            type="time"
+            value={endTime}
+            onChange={(e) => setEndTime(e.target.value)}
+            className="border p-2 rounded text-sm bg-background text-foreground"
+            required
+          />
+        </div>
+        <Button type="submit">Add Template</Button>
+      </form>
+    </CardContent>
+  </Card>
+</section>
+
+
+
+      {/* Shift Scheduler Section */}
       <section>
         <Card>
           <CardHeader>
-            <CardTitle>My employees</CardTitle>
-            <CardDescription>People reporting to you</CardDescription>
+            <CardTitle>Shift Scheduling</CardTitle>
+            <CardDescription>Assign shifts to employees by date</CardDescription>
           </CardHeader>
-          <CardContent>
-            <ul className="list-disc pl-5">
-              {employees.map((e) => (
-                <li key={e.id}>{e.full_name}</li>
-              ))}
-            </ul>
+          <CardContent className="space-y-4">
+            <div className="flex items-center gap-4 bg-muted/40 p-3 rounded-lg max-w-sm">
+              <label htmlFor="target-date" className="text-sm font-medium">Target Date:</label>
+              <input
+                id="target-date"
+                type="date"
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                className="border p-1 rounded text-sm bg-background text-foreground"
+              />
+            </div>
+
+            {assignmentStatus && (
+              <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+                {assignmentStatus}
+              </p>
+            )}
+
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Employee</TableHead>
+                  <TableHead>Assign Shift for {selectedDate}</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {employees.map((emp) => (
+                  <TableRow key={emp.id}>
+                    <TableCell className="font-medium">{emp.full_name}</TableCell>
+                    <TableCell>
+                      <select
+                        defaultValue=""
+                        onChange={(e) => assignShift(emp.id, e.target.value)}
+                        className="w-full max-w-xs border p-2 rounded text-sm bg-background text-foreground"
+                      >
+                        <option value="" disabled>Select a shift...</option>
+                        {shifts.map((shift) => (
+                          <option key={shift.id} value={shift.id}>
+                            {shift.name} ({shift.start_time.slice(0, 5)} - {shift.end_time.slice(0, 5)})
+                          </option>
+                        ))}
+                      </select>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </section>
 
+      {/* Leave Requests Section */}
       <section>
         <Card>
           <CardHeader>
@@ -113,13 +299,13 @@ export default function ManagerPage() {
           <CardContent>
             <Table>
               <TableHeader>
-                <tr>
+                <TableRow>
                   <TableHead>Employee</TableHead>
                   <TableHead>Dates</TableHead>
                   <TableHead>Reason</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Action</TableHead>
-                </tr>
+                </TableRow>
               </TableHeader>
               <TableBody>
                 {leaveRequests.map((lr) => (
@@ -150,6 +336,7 @@ export default function ManagerPage() {
         </Card>
       </section>
 
+      {/* Attendance Section */}
       <section>
         <Card>
           <CardHeader>
@@ -158,11 +345,11 @@ export default function ManagerPage() {
           <CardContent>
             <Table>
               <TableHeader>
-                <tr>
+                <TableRow>
                   <TableHead>Employee</TableHead>
                   <TableHead>Check in</TableHead>
                   <TableHead>Check out</TableHead>
-                </tr>
+                </TableRow>
               </TableHeader>
               <TableBody>
                 {attendance.map((a) => (

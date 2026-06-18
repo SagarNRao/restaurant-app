@@ -1,168 +1,237 @@
-"use client"
+"use client";
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase/client'
-import { useRequireRole } from '@/lib/useRequireRole'
-import type { Attendance, LeaveRequest } from '@/lib/types'
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase/client";
+import { useRequireRole } from "@/lib/useRequireRole";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from "@/components/ui/card";
 
-import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
-import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/table'
+interface ActiveAttendance {
+  id: string;
+  check_in: string;
+  scheduled_start: string;
+  scheduled_end: string;
+  status: string;
+}
 
 export default function EmployeePage() {
-  const router = useRouter()
-  const { profile, loading } = useRequireRole('employee')
-  const [attendance, setAttendance] = useState<Attendance[]>([])
-  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([])
-  const [openShift, setOpenShift] = useState<Attendance | null>(null)
-  const [startDate, setStartDate] = useState('')
-  const [endDate, setEndDate] = useState('')
-  const [reason, setReason] = useState('')
+  const router = useRouter();
+  // Protecting the page: ensures only employees can access it
+  const { profile, loading } = useRequireRole("employee");
+
+  const [activeAttendance, setActiveAttendance] =
+    useState<ActiveAttendance | null>(null);
+  const [fetchingStatus, setFetchingStatus] = useState(true);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
-    if (profile) loadData(profile.id)
-  }, [profile])
+    if (profile) {
+      checkActiveSession(profile.id);
+    }
+  }, [profile]);
 
-  async function loadData(employeeId: string) {
-    const [{ data: att }, { data: leave }] = await Promise.all([
-      supabase
-        .from('attendance')
-        .select('*')
-        .eq('employee_id', employeeId)
-        .order('check_in', { ascending: false }),
-      supabase
-        .from('leave_requests')
-        .select('*')
-        .eq('employee_id', employeeId)
-        .order('created_at', { ascending: false }),
-    ])
-    setAttendance(att ?? [])
-    setLeaveRequests(leave ?? [])
-    setOpenShift((att ?? []).find((a) => !a.check_out) ?? null)
+  // Checks if the user is currently clocked in for today
+  async function checkActiveSession(employeeId: string) {
+    setFetchingStatus(true);
+    const { data, error } = await supabase
+      .from("attendance")
+      .select("id, check_in, scheduled_start, scheduled_end, status")
+      .eq("employee_id", employeeId)
+      .is("check_out", null) // Look for an ongoing session where check_out hasn't happened
+      .order("check_in", { ascending: false })
+      .maybeSingle();
+
+    if (!error && data) {
+      setActiveAttendance(data);
+    }
+    setFetchingStatus(false);
   }
 
-  async function checkIn() {
-    if (!profile) return
-    await supabase.from('attendance').insert({ employee_id: profile.id, branch_id: profile.branch_id })
-    loadData(profile.id)
+ async function handleCheckIn() {
+  if (!profile) return
+  setErrorMsg(null)
+
+  const now = new Date()
+  const todayStr = now.toISOString().split('T')[0] // Returns "2026-06-18"
+
+  // 1. Query today's assignment from shift_assignments, joining the shifts data
+  const { data: assignment, error: assignmentErr } = await supabase
+    .from('shift_assignments')
+    .select(`
+      id,
+      date,
+      shifts:shift_id (
+        start_time,
+        end_time
+      )
+    `)
+    .eq('employee_id', profile.id)
+    .eq('date', todayStr)
+    .maybeSingle()
+
+  // Debug log to see exactly what Supabase found
+  console.log("Shift Assignment Found:", assignment)
+
+  if (assignmentErr || !assignment || !assignment.shifts) {
+    setErrorMsg("You don't have an assigned shift for today. Contact your manager.")
+    return
   }
 
-  async function checkOut() {
-    if (!profile || !openShift) return
-    await supabase
-      .from('attendance')
-      .update({ check_out: new Date().toISOString() })
-      .eq('id', openShift.id)
-    loadData(profile.id)
+  // 2. Safely extract the shift times
+  const shiftData = assignment.shifts as any
+  
+  // Create proper absolute timestamps combining today's date with the shift times
+  const scheduledStart = new Date(`${todayStr}T${shiftData.start_time}`)
+  const scheduledEnd = new Date(`${todayStr}T${shiftData.end_time}`)
+
+  // 3. Late Detection (5 minute grace period)
+  let finalStatus = 'present'
+  const gracePeriodInMs = 5 * 60 * 1000 
+  if (now.getTime() > (scheduledStart.getTime() + gracePeriodInMs)) {
+    finalStatus = 'late'
   }
 
-  async function applyLeave(e: React.FormEvent) {
-    e.preventDefault()
-    if (!profile) return
-    await supabase.from('leave_requests').insert({
+  // 4. Save to the attendance table
+  const { data: newRecord, error: insertErr } = await supabase
+    .from('attendance')
+    .insert({
       employee_id: profile.id,
-      manager_id: profile.manager_id,
-      start_date: startDate,
-      end_date: endDate,
-      reason,
+      branch_id: profile.branch_id, // Grabs the branch from the current active user profile
+      check_in: now.toISOString(),
+      scheduled_start: scheduledStart.toISOString(),
+      scheduled_end: scheduledEnd.toISOString(),
+      status: finalStatus
     })
-    setStartDate('')
-    setEndDate('')
-    setReason('')
-    loadData(profile.id)
+    .select()
+    .single()
+
+  if (insertErr) {
+    setErrorMsg(`Check-in failed: ${insertErr.message}`)
+    console.error("Attendance Insert Error:", insertErr)
+  } else {
+    setActiveAttendance(newRecord)
+  }
+}
+  async function handleCheckOut() {
+    if (!activeAttendance || !profile) return;
+    setErrorMsg(null);
+
+    const now = new Date();
+    const scheduledEnd = new Date(activeAttendance.scheduled_end);
+    let overtimeMinutes = 0;
+
+    // Calculate overtime minutes if they stay past their scheduled shift end
+    if (now > scheduledEnd) {
+      const diffInMs = now.getTime() - scheduledEnd.getTime();
+      overtimeMinutes = Math.floor(diffInMs / 1000 / 60);
+    }
+
+    const { error: updateErr } = await supabase
+      .from("attendance")
+      .update({
+        check_out: now.toISOString(),
+        overtime_minutes: overtimeMinutes,
+      })
+      .eq("id", activeAttendance.id);
+
+    if (updateErr) {
+      setErrorMsg(`Check-out failed: ${updateErr.message}`);
+    } else {
+      setActiveAttendance(null);
+    }
   }
 
   async function logout() {
-    await supabase.auth.signOut()
-    router.push('/')
+    await supabase.auth.signOut();
+    router.push("/");
   }
 
-  if (loading) return <p className="p-10">Loading...</p>
+  if (loading || fetchingStatus) return <p className="p-10">Loading...</p>;
 
   return (
-    <main className="max-w-3xl mx-auto my-10 px-4 space-y-6">
+    <main className="max-w-md mx-auto my-10 px-4 space-y-6">
       <Card>
-        <CardHeader>
-          <CardTitle>Employee Dashboard</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="flex justify-between items-center">
-            <p>Welcome, {profile?.full_name}</p>
-            <Button variant="ghost" size="sm" onClick={logout}>Log out</Button>
+        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+          <div>
+            <CardTitle>Welcome, {profile?.full_name}</CardTitle>
+            <CardDescription>Employee Dashboard</CardDescription>
           </div>
+          <Button variant="ghost" size="sm" onClick={logout}>
+            Log out
+          </Button>
+        </CardHeader>
+        <CardContent className="pt-4 space-y-4">
+          {errorMsg && (
+            <div className="bg-destructive/10 text-destructive text-sm p-3 rounded-md">
+              {errorMsg}
+            </div>
+          )}
+
+          {!activeAttendance ? (
+            <div className="text-center space-y-4 py-6">
+              <p className="text-sm text-muted-foreground">
+                You are currently clocked out.
+              </p>
+              <Button size="lg" className="w-full" onClick={handleCheckIn}>
+                Clock In
+              </Button>
+            </div>
+          ) : (
+            <div className="space-y-4 py-4">
+              <div className="bg-muted p-4 rounded-lg space-y-2 text-sm">
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Clocked in at:</span>
+                  <span className="font-medium">
+                    {new Date(activeAttendance.check_in).toLocaleTimeString()}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Shift Target:</span>
+                  <span className="font-medium">
+                    {new Date(
+                      activeAttendance.scheduled_start,
+                    ).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}{" "}
+                    -
+                    {new Date(
+                      activeAttendance.scheduled_end,
+                    ).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })}
+                  </span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-muted-foreground">Status:</span>
+                  <span
+                    className={`font-semibold capitalize ${activeAttendance.status === "late" ? "text-destructive" : "text-emerald-600"}`}
+                  >
+                    {activeAttendance.status}
+                  </span>
+                </div>
+              </div>
+
+              <Button
+                size="lg"
+                variant="destructive"
+                className="w-full"
+                onClick={handleCheckOut}
+              >
+                Clock Out
+              </Button>
+            </div>
+          )}
         </CardContent>
       </Card>
-
-      <section>
-        <Card>
-          <CardHeader>
-            <CardTitle>Attendance</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <div className="mb-4">
-              {openShift ? (
-                <Button onClick={checkOut} variant="destructive">Check out</Button>
-              ) : (
-                <Button onClick={checkIn}>Check in</Button>
-              )}
-            </div>
-            <Table>
-              <TableHeader>
-                <tr>
-                  <TableHead>Check in</TableHead>
-                  <TableHead>Check out</TableHead>
-                </tr>
-              </TableHeader>
-              <TableBody>
-                {attendance.map((a) => (
-                  <TableRow key={a.id}>
-                    <TableCell>{new Date(a.check_in).toLocaleString()}</TableCell>
-                    <TableCell>{a.check_out ? new Date(a.check_out).toLocaleString() : '—'}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </section>
-
-      <section>
-        <Card>
-          <CardHeader>
-            <CardTitle>Apply for leave</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={applyLeave} className="flex flex-col gap-3">
-              <Input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} required />
-              <Input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} required />
-              <Input placeholder="Reason" value={reason} onChange={(e) => setReason(e.target.value)} />
-              <Button type="submit">Apply</Button>
-            </form>
-
-            <h3 className="mt-4">My leave requests</h3>
-            <Table>
-              <TableHeader>
-                <tr>
-                  <TableHead>Dates</TableHead>
-                  <TableHead>Reason</TableHead>
-                  <TableHead>Status</TableHead>
-                </tr>
-              </TableHeader>
-              <TableBody>
-                {leaveRequests.map((lr) => (
-                  <TableRow key={lr.id}>
-                    <TableCell>{lr.start_date} → {lr.end_date}</TableCell>
-                    <TableCell>{lr.reason}</TableCell>
-                    <TableCell className="capitalize">{lr.status}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </section>
     </main>
-  )
+  );
 }
