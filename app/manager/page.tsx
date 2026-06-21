@@ -1,12 +1,12 @@
-"use client"
+"use client";
 
-import { useEffect, useState } from 'react'
-import { useRouter } from 'next/navigation'
-import { supabase } from '@/lib/supabase/client'
-import { useRequireRole } from '@/lib/useRequireRole'
-import type { Attendance, LeaveRequest, Profile } from '@/lib/types'
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { supabase } from "@/lib/supabase/client";
+import { useRequireRole } from "@/lib/useRequireRole";
+import type { Attendance, LeaveRequest, Profile } from "@/lib/types";
 
-import { Button } from '@/components/ui/button'
+import { Button } from "@/components/ui/button";
 import {
   Card,
   CardHeader,
@@ -14,7 +14,7 @@ import {
   CardDescription,
   CardContent,
   CardAction,
-} from '@/components/ui/card'
+} from "@/components/ui/card";
 import {
   Table,
   TableHeader,
@@ -22,148 +22,158 @@ import {
   TableRow,
   TableHead,
   TableCell,
-} from '@/components/ui/table'
+} from "@/components/ui/table";
 
 // Quick type definitions for the new tables
 interface ShiftTemplate {
-  id: string
-  name: string
-  start_time: string
-  end_time: string
+  id: string;
+  name: string;
+  start_time: string;
+  end_time: string;
 }
 
 export default function ManagerPage() {
-  const router = useRouter()
-  const { profile, loading } = useRequireRole('manager')
+  const router = useRouter();
+  const { profile, loading } = useRequireRole("manager");
 
-  const [newShiftName, setNewShiftName] = useState('')
-  const [startTime, setStartTime] = useState('09:00')
-  const [endTime, setEndTime] = useState('17:00')
-  
-  const [employees, setEmployees] = useState<Profile[]>([])
-  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([])
-  const [attendance, setAttendance] = useState<Attendance[]>([])
-  
+  const [roster, setRoster] = useState<any[]>([])
+
+  const [newShiftName, setNewShiftName] = useState("");
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("17:00");
+
+  const [employees, setEmployees] = useState<Profile[]>([]);
+  const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
+  const [attendance, setAttendance] = useState<Attendance[]>([]);
+
   // New State for Shifts
-  const [shifts, setShifts] = useState<ShiftTemplate[]>([])
+  const [shifts, setShifts] = useState<ShiftTemplate[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(
-    new Date().toISOString().split('T')[0] // Defaults to today
-  )
-  const [assignmentStatus, setAssignmentStatus] = useState<string | null>(null)
+    new Date().toISOString().split("T")[0], // Defaults to today
+  );
+  const [assignmentStatus, setAssignmentStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    if (profile) loadData(profile.id, profile.branch_id)
-  }, [profile])
-
-  async function handleCreateShift(e: React.FormEvent) {
-  e.preventDefault()
-  if (!profile?.branch_id || !newShiftName) return
-
-  // Database expects TIME format: "HH:MM:SS"
-  const formattedStart = `${startTime}:00`
-  const formattedEnd = `${endTime}:00`
-
-  const { error } = await supabase.from('shifts').insert({
-    branch_id: profile.branch_id,
-    name: newShiftName,
-    start_time: formattedStart,
-    end_time: formattedEnd,
-  })
-
-  if (error) {
-    alert(`Failed to create shift: ${error.message}`)
-  } else {
-    setNewShiftName('') // Reset form
-    loadData(profile.id, profile.branch_id) // Refresh shift list dropdown
-  }
-}
+    if (profile) loadData(profile.id, profile.branch_id);
+  }, [profile]);
 
   async function loadData(managerId: string, branchId: string | null) {
-    // 1. Grab templates available for this branch
-    let shiftTemplates: ShiftTemplate[] = []
-    if (branchId) {
-      const { data: sData } = await supabase
-        .from('shifts')
-        .select('id, name, start_time, end_time')
-        .eq('branch_id', branchId)
-      shiftTemplates = sData ?? []
-    }
-
-    const [{ data: emp }, { data: leave }, { data: att }] = await Promise.all([
-      supabase.from('profiles').select('*').eq('manager_id', managerId),
-      supabase
-        .from('leave_requests')
-        .select('*')
-        .eq('manager_id', managerId)
-        .order('created_at', { ascending: false }),
-      supabase.from('attendance').select('*').order('check_in', { ascending: false }).limit(20),
-    ])
-
-    setShifts(shiftTemplates)
-    setEmployees(emp ?? [])
-    setLeaveRequests(leave ?? [])
-    setAttendance(att ?? [])
+  let shiftTemplates: ShiftTemplate[] = []
+  if (branchId) {
+    const { data: sData } = await supabase
+      .from('shifts')
+      .select('id, name, start_time, end_time')
+      .eq('branch_id', branchId)
+    shiftTemplates = sData ?? []
   }
 
+  const [{ data: emp }, { data: leave }, { data: rosterData }] = await Promise.all([
+    supabase.from('profiles').select('*').eq('manager_id', managerId),
+    supabase
+      .from('leave_requests')
+      .select('*')
+      .eq('manager_id', managerId)
+      .order('created_at', { ascending: false }),
+    // Fetching from our new custom view instead of raw attendance
+    supabase
+      .from('daily_roster_status')
+      .select('*')
+      .order('roster_date', { ascending: false })
+      .limit(30),
+  ])
+
+  setShifts(shiftTemplates)
+  setEmployees(emp ?? [])
+  setLeaveRequests(leave ?? [])
+  setRoster(rosterData ?? []) // Sets the combined roster state
+}
+
+  async function handleCreateShift(e: React.FormEvent) {
+    e.preventDefault();
+    if (!profile?.branch_id || !newShiftName) return;
+
+    // Database expects TIME format: "HH:MM:SS"
+    const formattedStart = `${startTime}:00`;
+    const formattedEnd = `${endTime}:00`;
+
+    const { error } = await supabase.from("shifts").insert({
+      branch_id: profile.branch_id,
+      name: newShiftName,
+      start_time: formattedStart,
+      end_time: formattedEnd,
+    });
+
+    if (error) {
+      alert(`Failed to create shift: ${error.message}`);
+    } else {
+      setNewShiftName(""); // Reset form
+      loadData(profile.id, profile.branch_id); // Refresh shift list dropdown
+    }
+  }
+
+
   async function assignShift(employeeId: string, shiftId: string) {
-    if (!shiftId) return
-    setAssignmentStatus(null)
+    if (!shiftId) return;
+    setAssignmentStatus(null);
 
     // Upsert assignment (if they already have a shift today, overwrite it)
-    const { error } = await supabase.from('shift_assignments').upsert(
+    const { error } = await supabase.from("shift_assignments").upsert(
       {
         employee_id: employeeId,
         shift_id: shiftId,
         date: selectedDate,
       },
-      { onConflict: 'employee_id,date' }
-    )
+      { onConflict: "employee_id,date" },
+    );
 
     if (error) {
-      setAssignmentStatus(`Error: ${error.message}`)
+      setAssignmentStatus(`Error: ${error.message}`);
     } else {
-      setAssignmentStatus('Shift assigned successfully!')
+      setAssignmentStatus("Shift assigned successfully!");
       // Clear status message after 3 seconds
-      setTimeout(() => setAssignmentStatus(null), 3000)
+      setTimeout(() => setAssignmentStatus(null), 3000);
     }
   }
 
-  async function decide(id: string, status: 'approved' | 'rejected') {
-    if (!profile) return
+  async function decide(id: string, status: "approved" | "rejected") {
+    if (!profile) return;
     await supabase
-      .from('leave_requests')
+      .from("leave_requests")
       .update({ status, decided_at: new Date().toISOString() })
-      .eq('id', id)
-    loadData(profile.id, profile.branch_id)
+      .eq("id", id);
+    loadData(profile.id, profile.branch_id);
   }
 
   async function logout() {
-    await supabase.auth.signOut()
-    router.push('/')
+    await supabase.auth.signOut();
+    router.push("/");
   }
 
-  if (loading) return <p className="p-10">Loading...</p>
+  if (loading) return <p className="p-10">Loading...</p>;
 
   function employeeName(id: string) {
-    return employees.find((e) => e.id === id)?.full_name ?? id
+    return employees.find((e) => e.id === id)?.full_name ?? id;
   }
 
   // Put this function inside your ManagerPage component
-async function updateEmployeeDefaultShift(employeeId: string, shiftId: string) {
-  if (!profile) return
+  async function updateEmployeeDefaultShift(
+    employeeId: string,
+    shiftId: string,
+  ) {
+    if (!profile) return;
 
-  const { error } = await supabase
-    .from('profiles')
-    .update({ shift_id: shiftId })
-    .eq('id', employeeId)
+    const { error } = await supabase
+      .from("profiles")
+      .update({ shift_id: shiftId })
+      .eq("id", employeeId);
 
-  if (error) {
-    alert(`Failed to update shift: ${error.message}`)
-  } else {
-    // Refresh the local state data
-    loadData(profile.id, profile.branch_id)
+    if (error) {
+      alert(`Failed to update shift: ${error.message}`);
+    } else {
+      // Refresh the local state data
+      loadData(profile.id, profile.branch_id);
+    }
   }
-}
 
   return (
     <main className="max-w-3xl mx-auto my-10 px-4 space-y-6">
@@ -177,70 +187,182 @@ async function updateEmployeeDefaultShift(employeeId: string, shiftId: string) {
           </CardAction>
         </CardHeader>
         <CardContent>
-          <p className="text-sm text-muted-foreground">Welcome, {profile?.full_name}</p>
+          <p className="text-sm text-muted-foreground">
+            Welcome, {profile?.full_name}
+          </p>
         </CardContent>
       </Card>
 
       
 
-      {/* Create Shift Template Form */}
-<section>
+      {/* Leave Requests Section */}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Leave requests</CardTitle>
+            <CardDescription>
+              Approve or reject pending requests
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Employee</TableHead>
+                  <TableHead>Dates</TableHead>
+                  <TableHead>Reason</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Action</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {leaveRequests.map((lr) => (
+                  <TableRow key={lr.id}>
+                    <TableCell>{employeeName(lr.employee_id)}</TableCell>
+                    <TableCell>
+                      {lr.start_date} → {lr.end_date}
+                    </TableCell>
+                    <TableCell>{lr.reason}</TableCell>
+                    <TableCell className="capitalize">{lr.status}</TableCell>
+                    <TableCell>
+                      {lr.status === "pending" && (
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant="default"
+                            onClick={() => decide(lr.id, "approved")}
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() => decide(lr.id, "rejected")}
+                          >
+                            Reject
+                          </Button>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* Attendance Section */}
+      <section>
   <Card>
     <CardHeader>
-      <CardTitle>Create Shift Templates</CardTitle>
-      <CardDescription>Define standard working hours for your branch</CardDescription>
+      <CardTitle>Daily Shift Roster & Attendance Tracking</CardTitle>
+      <CardDescription>Real-time look at schedules, clock-ins, leaves, and absences.</CardDescription>
     </CardHeader>
     <CardContent>
-      <form onSubmit={handleCreateShift} className="flex flex-wrap gap-4 items-end">
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-semibold">Shift Name</label>
-          <input
-            type="text"
-            placeholder="e.g., Night Shift"
-            value={newShiftName}
-            onChange={(e) => setNewShiftName(e.target.value)}
-            className="border p-2 rounded text-sm bg-background text-foreground w-48"
-            required
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-semibold">Start Time</label>
-          <input
-            type="time"
-            value={startTime}
-            onChange={(e) => setStartTime(e.target.value)}
-            className="border p-2 rounded text-sm bg-background text-foreground"
-            required
-          />
-        </div>
-        <div className="flex flex-col gap-1.5">
-          <label className="text-xs font-semibold">End Time</label>
-          <input
-            type="time"
-            value={endTime}
-            onChange={(e) => setEndTime(e.target.value)}
-            className="border p-2 rounded text-sm bg-background text-foreground"
-            required
-          />
-        </div>
-        <Button type="submit">Add Template</Button>
-      </form>
+      <Table>
+        <TableHeader>
+          <TableRow>
+            <TableHead>Employee</TableHead>
+            <TableHead>Date</TableHead>
+            <TableHead>Shift</TableHead>
+            <TableHead>Actual Check In</TableHead>
+            <TableHead>Status</TableHead>
+          </TableRow>
+        </TableHeader>
+        <TableBody>
+          {roster.map((row) => (
+            <TableRow key={row.assignment_id}>
+              <TableCell className="font-medium">{employeeName(row.employee_id)}</TableCell>
+              <TableCell>{row.roster_date}</TableCell>
+              <TableCell>{row.shift_name}</TableCell>
+              <TableCell>
+                {row.check_in ? new Date(row.check_in).toLocaleTimeString() : '—'}
+              </TableCell>
+              <TableCell>
+                <span className={`px-2 py-1 text-xs font-semibold rounded-full ${
+                  row.final_status === 'present' ? 'bg-emerald-100 text-emerald-800' :
+                  row.final_status === 'late' ? 'bg-amber-100 text-amber-800' :
+                  row.final_status === 'on leave' ? 'bg-blue-100 text-blue-800' :
+                  row.final_status === 'absent' ? 'bg-rose-100 text-rose-800' :
+                  'bg-muted text-muted-foreground'
+                }`}>
+                  {row.final_status}
+                </span>
+              </TableCell>
+            </TableRow>
+          ))}
+        </TableBody>
+      </Table>
     </CardContent>
   </Card>
 </section>
 
-
+      {/* Create Shift Template Form */}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Create Shift Templates</CardTitle>
+            <CardDescription>
+              Define standard working hours for your branch
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form
+              onSubmit={handleCreateShift}
+              className="flex flex-wrap gap-4 items-end"
+            >
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold">Shift Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g., Night Shift"
+                  value={newShiftName}
+                  onChange={(e) => setNewShiftName(e.target.value)}
+                  className="border p-2 rounded text-sm bg-background text-foreground w-48"
+                  required
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold">Start Time</label>
+                <input
+                  type="time"
+                  value={startTime}
+                  onChange={(e) => setStartTime(e.target.value)}
+                  className="border p-2 rounded text-sm bg-background text-foreground"
+                  required
+                />
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <label className="text-xs font-semibold">End Time</label>
+                <input
+                  type="time"
+                  value={endTime}
+                  onChange={(e) => setEndTime(e.target.value)}
+                  className="border p-2 rounded text-sm bg-background text-foreground"
+                  required
+                />
+              </div>
+              <Button type="submit">Add Template</Button>
+            </form>
+          </CardContent>
+        </Card>
+      </section>
 
       {/* Shift Scheduler Section */}
       <section>
         <Card>
           <CardHeader>
-            <CardTitle>Shift Scheduling</CardTitle>
-            <CardDescription>Assign shifts to employees by date</CardDescription>
+            <CardTitle>SAssign new shift</CardTitle>
+            <CardDescription>
+              Assign new shifts to employees
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center gap-4 bg-muted/40 p-3 rounded-lg max-w-sm">
-              <label htmlFor="target-date" className="text-sm font-medium">Target Date:</label>
+              <label htmlFor="target-date" className="text-sm font-medium">
+                Target Date:
+              </label>
               <input
                 id="target-date"
                 type="date"
@@ -266,17 +388,22 @@ async function updateEmployeeDefaultShift(employeeId: string, shiftId: string) {
               <TableBody>
                 {employees.map((emp) => (
                   <TableRow key={emp.id}>
-                    <TableCell className="font-medium">{emp.full_name}</TableCell>
+                    <TableCell className="font-medium">
+                      {emp.full_name}
+                    </TableCell>
                     <TableCell>
                       <select
                         defaultValue=""
                         onChange={(e) => assignShift(emp.id, e.target.value)}
                         className="w-full max-w-xs border p-2 rounded text-sm bg-background text-foreground"
                       >
-                        <option value="" disabled>Select a shift...</option>
+                        <option value="" disabled>
+                          Select a shift...
+                        </option>
                         {shifts.map((shift) => (
                           <option key={shift.id} value={shift.id}>
-                            {shift.name} ({shift.start_time.slice(0, 5)} - {shift.end_time.slice(0, 5)})
+                            {shift.name} ({shift.start_time.slice(0, 5)} -{" "}
+                            {shift.end_time.slice(0, 5)})
                           </option>
                         ))}
                       </select>
@@ -288,82 +415,6 @@ async function updateEmployeeDefaultShift(employeeId: string, shiftId: string) {
           </CardContent>
         </Card>
       </section>
-
-      {/* Leave Requests Section */}
-      <section>
-        <Card>
-          <CardHeader>
-            <CardTitle>Leave requests</CardTitle>
-            <CardDescription>Approve or reject pending requests</CardDescription>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Employee</TableHead>
-                  <TableHead>Dates</TableHead>
-                  <TableHead>Reason</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Action</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {leaveRequests.map((lr) => (
-                  <TableRow key={lr.id}>
-                    <TableCell>{employeeName(lr.employee_id)}</TableCell>
-                    <TableCell>
-                      {lr.start_date} → {lr.end_date}
-                    </TableCell>
-                    <TableCell>{lr.reason}</TableCell>
-                    <TableCell className="capitalize">{lr.status}</TableCell>
-                    <TableCell>
-                      {lr.status === 'pending' && (
-                        <div className="flex gap-2">
-                          <Button size="sm" variant="default" onClick={() => decide(lr.id, 'approved')}>
-                            Approve
-                          </Button>
-                          <Button size="sm" variant="destructive" onClick={() => decide(lr.id, 'rejected')}>
-                            Reject
-                          </Button>
-                        </div>
-                      )}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </section>
-
-      {/* Attendance Section */}
-      <section>
-        <Card>
-          <CardHeader>
-            <CardTitle>Recent attendance</CardTitle>
-          </CardHeader>
-          <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Employee</TableHead>
-                  <TableHead>Check in</TableHead>
-                  <TableHead>Check out</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {attendance.map((a) => (
-                  <TableRow key={a.id}>
-                    <TableCell>{employeeName(a.employee_id)}</TableCell>
-                    <TableCell>{new Date(a.check_in).toLocaleString()}</TableCell>
-                    <TableCell>{a.check_out ? new Date(a.check_out).toLocaleString() : '—'}</TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </CardContent>
-        </Card>
-      </section>
     </main>
-  )
+  );
 }
