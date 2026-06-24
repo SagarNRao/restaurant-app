@@ -1,0 +1,4 @@
+assignment_id,employee_id,roster_date,shift_name,start_time,end_time,attendance_id,check_in,check_out,final_status
+d8af333b-6da9-4cd6-bf5e-91f8c880b793,cfe20a08-8096-45b1-adf9-6bde914abbf5,2026-06-18,day shift,09:00:00,17:00:00,,,,absent
+dd9b7a4e-d6d9-4454-963d-b048aef1a840,d23bd020-bb9d-497b-8a51-2a26e282eaec,2026-06-18,day shift,09:00:00,17:00:00,a6d8a1c1-df80-42d4-9157-96784f88366e,2026-06-18 11:33:32.554+00,2026-06-18 11:39:34.777+00,late
+dd9b7a4e-d6d9-4454-963d-b048aef1a840,d23bd020-bb9d-497b-8a51-2a26e282eaec,2026-06-18,day shift,09:00:00,17:00:00,7af7bbd9-8907-404d-b628-5f2b9123afd6,2026-06-18 11:51:10.057+00,2026-06-18 11:53:00.833+00,late
