@@ -73,11 +73,11 @@ export default function ManagerPage() {
   >("present");
   const [attStatusMsg, setAttStatusMsg] = useState<string | null>(null);
 
+  const [otRequests, setOtRequests] = useState<any[]>([]);
+
   useEffect(() => {
     if (profile) loadData(profile.id, profile.branch_id);
   }, [profile]);
-
-  
 
   // Converts a Date into a local-timezone "YYYY-MM-DD" string, consistently
   // used both for the calendar selection and for stored attendance rows.
@@ -179,6 +179,15 @@ export default function ManagerPage() {
         .order("created_at", { ascending: false }),
     ]);
 
+    // 2. Inside your loadData() function, add this query to the Promise.all array or beneath it:
+    const { data: otData } = await supabase
+      .from("overtime_requests")
+      .select("*")
+      .eq("manager_id", managerId)
+      .order("created_at", { ascending: false });
+
+    setOtRequests(otData ?? []);
+
     // Pull real attendance records for this branch directly, instead of the
     // daily_roster_status view. That view was queried with no branch filter
     // and a flat limit(200) across the whole table, so on any active system
@@ -212,6 +221,40 @@ export default function ManagerPage() {
 
   // Allow the manager to force log an employee check-in manually
   // Allow the manager to log attendance for the specific date of the roster row
+
+  async function handleDecideOvertime(
+    request: any,
+    finalStatus: "approved" | "rejected",
+  ) {
+    if (!profile) return;
+
+    // 1. Mark request state status
+    await supabase
+      .from("overtime_requests")
+      .update({ status: finalStatus, decided_at: new Date().toISOString() })
+      .eq("id", request.id);
+
+    // 2. If approved, append those minutes directly into their raw attendance metrics
+    if (finalStatus === "approved") {
+      // Find attendance record matching that day range
+      const { data: attRecord } = await supabase
+        .from("attendance")
+        .select("id")
+        .eq("employee_id", request.employee_id)
+        .like("scheduled_start", `${request.date}%`)
+        .maybeSingle();
+
+      if (attRecord) {
+        await supabase
+          .from("attendance")
+          .update({ overtime_minutes: request.minutes_requested })
+          .eq("id", attRecord.id);
+      }
+    }
+
+    // Refresh component states
+    loadData(profile.id, profile.branch_id);
+  }
 
   async function handleExplicitMarkAttendance(e: React.FormEvent) {
     e.preventDefault();
@@ -323,7 +366,6 @@ export default function ManagerPage() {
       setCalendarDayAttendance([]);
     }
   }
-
 
   async function handleAddEmployee(e: React.FormEvent) {
     e.preventDefault();
@@ -670,6 +712,76 @@ export default function ManagerPage() {
                 </div>
               </div>
             </div>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* Overtime Approvals Section */}
+      <section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Overtime Claims Queue</CardTitle>
+            <CardDescription>
+              Review and authorize extra logged operational hours.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Employee</TableHead>
+                  <TableHead>Date</TableHead>
+                  <TableHead>Claimed Volume</TableHead>
+                  <TableHead>Reasoning Context</TableHead>
+                  <TableHead>Status</TableHead>
+                  <TableHead>Action Options</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {otRequests.map((req) => (
+                  <TableRow key={req.id}>
+                    <TableCell className="font-medium">
+                      {employeeName(req.employee_id)}
+                    </TableCell>
+                    <TableCell>{req.date}</TableCell>
+                    <TableCell>
+                      {req.minutes_requested} mins (~
+                      {(req.minutes_requested / 60).toFixed(1)} hrs)
+                    </TableCell>
+                    <TableCell className="max-w-xs truncate">
+                      {req.reason}
+                    </TableCell>
+                    <TableCell className="capitalize font-semibold">
+                      {req.status}
+                    </TableCell>
+                    <TableCell>
+                      {req.status === "pending" && (
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white"
+                            onClick={() =>
+                              handleDecideOvertime(req, "approved")
+                            }
+                          >
+                            Authorize
+                          </Button>
+                          <Button
+                            size="sm"
+                            variant="destructive"
+                            onClick={() =>
+                              handleDecideOvertime(req, "rejected")
+                            }
+                          >
+                            Deny
+                          </Button>
+                        </div>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </CardContent>
         </Card>
       </section>
