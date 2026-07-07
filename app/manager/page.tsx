@@ -6,6 +6,7 @@ import { supabase } from "@/lib/supabase/client";
 import { useRequireRole } from "@/lib/useRequireRole";
 import type { Attendance, LeaveRequest, Profile } from "@/lib/types";
 import { Calendar } from "@/components/ui/calendar";
+import Link from "next/navigation";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -656,7 +657,7 @@ export default function ManagerPage() {
               {/* Right Side: Employee Status Table Rows */}
               <div className="md:col-span-2 space-y-6">
                 <div className="grid grid-cols-2 text-sm font-semibold text-zinc-400 border-b border-zinc-800 pb-2">
-                  <div>Employees (Distinct)</div>
+                  <div>Employees</div>
                   <div>Status Designation</div>
                 </div>
 
@@ -672,8 +673,13 @@ export default function ManagerPage() {
                         key={emp.id}
                         className="grid grid-cols-2 items-center text-sm py-2 border-b border-zinc-900"
                       >
-                        <div className="font-medium text-zinc-200">
-                          {emp.full_name}
+                        <div className="font-medium text-zinc-200 underline">
+                          <a
+                            href={`/${encodeURIComponent(emp.full_name)}`}
+                            className="hover:underline"
+                          >
+                            {emp.full_name}
+                          </a>
                         </div>
                         <div className="flex items-center justify-between gap-4">
                           <span
