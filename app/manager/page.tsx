@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { supabase } from "@/lib/supabase/client";
 import { useRequireRole } from "@/lib/useRequireRole";
 import type { Attendance, LeaveRequest, Profile } from "@/lib/types";
+import { Calendar } from "@/components/ui/calendar";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -24,7 +25,6 @@ import {
   TableCell,
 } from "@/components/ui/table";
 
-// Quick type definitions for the new tables
 interface ShiftTemplate {
   id: string;
   name: string;
@@ -35,7 +35,14 @@ interface ShiftTemplate {
 export default function ManagerPage() {
   const router = useRouter();
 
-  // New states for the Add Employee Form
+  const [activeCalendarDate, setActiveCalendarDate] = useState<Date>(
+    new Date(),
+  );
+  const [calendarDayAttendance, setCalendarDayAttendance] = useState<any[]>([]);
+  const [overrideStatusMsg, setOverrideStatusMsg] = useState<string | null>(
+    null,
+  );
+
   const [empEmail, setEmpEmail] = useState("");
   const [empPassword, setEmpPassword] = useState("");
   const [empFullName, setEmpFullName] = useState("");
@@ -44,25 +51,100 @@ export default function ManagerPage() {
   const { profile, loading } = useRequireRole("manager");
 
   const [roster, setRoster] = useState<any[]>([]);
-
   const [newShiftName, setNewShiftName] = useState("");
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("17:00");
 
   const [employees, setEmployees] = useState<Profile[]>([]);
   const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>([]);
-  const [attendance, setAttendance] = useState<Attendance[]>([]);
-
-  // New State for Shifts
   const [shifts, setShifts] = useState<ShiftTemplate[]>([]);
   const [selectedDate, setSelectedDate] = useState<string>(
-    new Date().toISOString().split("T")[0], // Defaults to today
+    new Date().toISOString().split("T")[0],
   );
   const [assignmentStatus, setAssignmentStatus] = useState<string | null>(null);
+
+  // New states for arbitrary date attendance logging
+  const [attTargetEmployee, setAttTargetEmployee] = useState("");
+  const [attTargetDate, setAttTargetDate] = useState(
+    new Date().toISOString().split("T")[0],
+  );
+  const [attTargetStatus, setAttTargetStatus] = useState<
+    "present" | "late" | "absent"
+  >("present");
+  const [attStatusMsg, setAttStatusMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (profile) loadData(profile.id, profile.branch_id);
   }, [profile]);
+
+  // Helper to look up an employee's status for the dynamically selected date
+  function getStatusForDate(employeeId: string, targetDate: Date) {
+    const year = targetDate.getFullYear();
+    const month = String(targetDate.getMonth() + 1).padStart(2, "0");
+    const day = String(targetDate.getDate()).padStart(2, "0");
+    const dateStr = `${year}-${month}-${day}`;
+
+    // 1. Look into the preloaded roster data first
+    const match = roster.find(
+      (r) => r.employee_id === employeeId && r.roster_date === dateStr,
+    );
+    if (match) return match.final_status;
+
+    // 2. If it's not found in the limited roster view, let the UI render "Absent"
+    // but we can ensure our upsert logic overwrites it cleanly.
+    return "absent";
+  }
+
+  // Handler that creates or updates the attendance record for the specific calendar day
+  async function handleStatusOverride(
+    employeeId: string,
+    targetDate: Date,
+    newStatus: "present" | "late" | "absent",
+  ) {
+    if (!profile) return;
+    setOverrideStatusMsg(null);
+
+    const year = targetDate.getFullYear();
+    const month = String(targetDate.getMonth() + 1).padStart(2, "0");
+    const day = String(targetDate.getDate()).padStart(2, "0");
+    const dateStr = `${year}-${month}-${day}`;
+
+    const scheduledStart = new Date(`${dateStr}T09:00:00`);
+    const scheduledEnd = new Date(`${dateStr}T17:00:00`);
+
+    const checkInTime =
+      newStatus === "absent" ? null : scheduledStart.toISOString();
+    const checkOutTime =
+      newStatus === "absent" ? null : scheduledEnd.toISOString();
+
+    // Step 1: Delete any existing attendance record for this employee on this exact day to prevent duplicates
+    await supabase
+      .from("attendance")
+      .delete()
+      .eq("employee_id", employeeId)
+      .gte("check_in", `${dateStr}T00:00:00`)
+      .lte("check_in", `${dateStr}T23:59:59`);
+
+    // Step 2: Insert the clean override record
+    const { error } = await supabase.from("attendance").insert({
+      employee_id: employeeId,
+      branch_id: profile.branch_id,
+      check_in: checkInTime,
+      check_out: checkOutTime,
+      scheduled_start: scheduledStart.toISOString(),
+      scheduled_end: scheduledEnd.toISOString(),
+      status: newStatus,
+    });
+
+    if (error) {
+      setOverrideStatusMsg(`Failed to save: ${error.message}`);
+    } else {
+      setOverrideStatusMsg("Attendance updated successfully!");
+      // Refresh the component state data[cite: 1]
+      loadData(profile.id, profile.branch_id);
+      setTimeout(() => setOverrideStatusMsg(null), 3000);
+    }
+  }
 
   async function loadData(managerId: string, branchId: string | null) {
     let shiftTemplates: ShiftTemplate[] = [];
@@ -82,40 +164,112 @@ export default function ManagerPage() {
           .select("*")
           .eq("manager_id", managerId)
           .order("created_at", { ascending: false }),
-        // Fetching from our new custom view instead of raw attendance
         supabase
           .from("daily_roster_status")
           .select("*")
           .order("roster_date", { ascending: false })
-          .limit(30),
+          .limit(200),
       ]);
 
     setShifts(shiftTemplates);
     setEmployees(emp ?? []);
     setLeaveRequests(leave ?? []);
-    setRoster(rosterData ?? []); // Sets the combined roster state
+    setRoster(rosterData ?? []);
+  }
+
+  // Allow the manager to force log an employee check-in manually
+  // Allow the manager to log attendance for the specific date of the roster row
+
+  async function handleExplicitMarkAttendance(e: React.FormEvent) {
+    e.preventDefault();
+    if (!profile || !attTargetEmployee) return;
+    setAttStatusMsg(null);
+
+    // Fallback default standard shift times if no custom template is linked on the fly
+    const scheduledStart = new Date(`${attTargetDate}T09:00:00`);
+    const scheduledEnd = new Date(`${attTargetDate}T17:00:00`);
+
+    const checkInTime =
+      attTargetStatus === "absent" ? null : scheduledStart.toISOString();
+    const checkOutTime =
+      attTargetStatus === "absent" ? null : scheduledEnd.toISOString();
+
+    const { error } = await supabase.from("attendance").insert({
+      employee_id: attTargetEmployee,
+      branch_id: profile.branch_id,
+      check_in: checkInTime,
+      check_out: checkOutTime,
+      scheduled_start: scheduledStart.toISOString(),
+      scheduled_end: scheduledEnd.toISOString(),
+      status: attTargetStatus,
+    });
+
+    if (error) {
+      setAttStatusMsg(`Error: ${error.message}`);
+    } else {
+      setAttStatusMsg("Attendance record saved successfully!");
+      setAttTargetEmployee("");
+      loadData(profile.id, profile.branch_id); // Refresh data view
+      setTimeout(() => setAttStatusMsg(null), 3000);
+    }
+  }
+
+  async function handleManagerMarkAttendance(
+    row: any,
+    statusOverride: "present" | "late" | "absent",
+  ) {
+    if (!profile) return;
+
+    const targetDate = row.roster_date; // e.g., "2026-07-01"
+
+    // Construct the scheduled range using the assigned shift's hours or fallbacks
+    const scheduledStart = new Date(
+      `${targetDate}T${row.shift_start_time || "09:00:00"}`,
+    );
+    const scheduledEnd = new Date(
+      `${targetDate}T${row.shift_end_time || "17:00:00"}`,
+    );
+
+    // If marking absent, check_in and check_out can remain null, or match schedule
+    const checkInTime =
+      statusOverride === "absent" ? null : scheduledStart.toISOString();
+    const checkOutTime =
+      statusOverride === "absent" ? null : scheduledEnd.toISOString();
+
+    const { error } = await supabase.from("attendance").insert({
+      employee_id: row.employee_id,
+      branch_id: profile.branch_id,
+      check_in: checkInTime,
+      check_out: checkOutTime,
+      scheduled_start: scheduledStart.toISOString(),
+      scheduled_end: scheduledEnd.toISOString(),
+      status: statusOverride,
+    });
+
+    if (error) {
+      alert(`Failed to log attendance: ${error.message}`);
+    } else {
+      // Refresh state to update the UI grid instantly
+      loadData(profile.id, profile.branch_id);
+    }
   }
 
   async function handleCreateShift(e: React.FormEvent) {
     e.preventDefault();
     if (!profile?.branch_id || !newShiftName) return;
 
-    // Database expects TIME format: "HH:MM:SS"
-    const formattedStart = `${startTime}:00`;
-    const formattedEnd = `${endTime}:00`;
-
     const { error } = await supabase.from("shifts").insert({
       branch_id: profile.branch_id,
       name: newShiftName,
-      start_time: formattedStart,
-      end_time: formattedEnd,
+      start_time: `${startTime}:00`,
+      end_time: `${endTime}:00`,
     });
 
     if (error) {
       alert(`Failed to create shift: ${error.message}`);
     } else {
-      setNewShiftName(""); // Reset form
-      loadData(profile.id, profile.branch_id); // Refresh shift list dropdown
+      setNewShiftName("");
+      loadData(profile.id, profile.branch_id);
     }
   }
 
@@ -124,7 +278,6 @@ export default function ManagerPage() {
     if (!profile) return;
     setAddEmpStatusMsg(null);
 
-    // Send the payload straight to our brand new API route
     const response = await fetch("/api/employees", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -132,9 +285,9 @@ export default function ManagerPage() {
         email: empEmail,
         password: empPassword,
         fullName: empFullName,
-        managerId: profile.id, // Active manager's ID
-        branchId: profile.branch_id, // Blended automatically to current active branch
-        ownerId: profile.owner_id, // Inherited directly from the branch mapping
+        managerId: profile.id,
+        branchId: profile.branch_id,
+        ownerId: profile.owner_id,
       }),
     });
 
@@ -147,7 +300,6 @@ export default function ManagerPage() {
       setEmpEmail("");
       setEmpPassword("");
       setEmpFullName("");
-      // Refresh the employee state grid so they show up on the shift selectors instantly
       loadData(profile.id, profile.branch_id);
       setTimeout(() => setAddEmpStatusMsg(null), 4000);
     }
@@ -157,21 +309,18 @@ export default function ManagerPage() {
     if (!shiftId) return;
     setAssignmentStatus(null);
 
-    // Upsert assignment (if they already have a shift today, overwrite it)
-    const { error } = await supabase.from("shift_assignments").upsert(
-      {
-        employee_id: employeeId,
-        shift_id: shiftId,
-        date: selectedDate,
-      },
-      { onConflict: "employee_id,date" },
-    );
+    const { error } = await supabase
+      .from("shift_assignments")
+      .upsert(
+        { employee_id: employeeId, shift_id: shiftId, date: selectedDate },
+        { onConflict: "employee_id,date" },
+      );
 
     if (error) {
       setAssignmentStatus(`Error: ${error.message}`);
     } else {
       setAssignmentStatus("Shift assigned successfully!");
-      // Clear status message after 3 seconds
+      loadData(profile!.id, profile!.branch_id);
       setTimeout(() => setAssignmentStatus(null), 3000);
     }
   }
@@ -196,29 +345,9 @@ export default function ManagerPage() {
     return employees.find((e) => e.id === id)?.full_name ?? id;
   }
 
-  // Put this function inside your ManagerPage component
-  async function updateEmployeeDefaultShift(
-    employeeId: string,
-    shiftId: string,
-  ) {
-    if (!profile) return;
-
-    const { error } = await supabase
-      .from("profiles")
-      .update({ shift_id: shiftId })
-      .eq("id", employeeId);
-
-    if (error) {
-      alert(`Failed to update shift: ${error.message}`);
-    } else {
-      // Refresh the local state data
-      loadData(profile.id, profile.branch_id);
-    }
-  }
-
   async function processSalary(employeeId: string) {
     if (!profile) return;
-    const currentPeriod = new Date().toISOString().slice(0, 7); // Returns "2026-06"
+    const currentPeriod = new Date().toISOString().slice(0, 7);
 
     const response = await fetch("/api/salary", {
       method: "POST",
@@ -241,7 +370,7 @@ export default function ManagerPage() {
   }
 
   return (
-    <main className="max-w-3xl mx-auto my-10 px-4 space-y-6">
+    <main className="max-w-4xl mx-auto my-10 px-4 space-y-6">
       <Card>
         <CardHeader>
           <CardTitle>Manager Dashboard</CardTitle>
@@ -292,7 +421,6 @@ export default function ManagerPage() {
                         <div className="flex gap-2">
                           <Button
                             size="sm"
-                            variant="default"
                             onClick={() => decide(lr.id, "approved")}
                           >
                             Approve
@@ -315,60 +443,181 @@ export default function ManagerPage() {
         </Card>
       </section>
 
-      {/* Attendance Section */}
+      {/* Explicit Ad-Hoc Attendance Input Component */}
       <section>
         <Card>
           <CardHeader>
-            <CardTitle>Daily Shift Roster & Attendance Tracking</CardTitle>
+            <CardTitle>Manual Attendance Override</CardTitle>
             <CardDescription>
-              Real-time look at schedules, clock-ins, leaves, and absences.
+              Force log an attendance record for any worker on any specified
+              historical or custom date.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Employee</TableHead>
-                  <TableHead>Date</TableHead>
-                  <TableHead>Shift</TableHead>
-                  <TableHead>Actual Check In</TableHead>
-                  <TableHead>Status</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {roster.map((row) => (
-                  <TableRow key={row.assignment_id}>
-                    <TableCell className="font-medium">
-                      {employeeName(row.employee_id)}
-                    </TableCell>
-                    <TableCell>{row.roster_date}</TableCell>
-                    <TableCell>{row.shift_name}</TableCell>
-                    <TableCell>
-                      {row.check_in
-                        ? new Date(row.check_in).toLocaleTimeString()
-                        : "—"}
-                    </TableCell>
-                    <TableCell>
-                      <span
-                        className={`px-2 py-1 text-xs font-semibold rounded-full ${
-                          row.final_status === "present"
-                            ? "bg-emerald-100 text-emerald-800"
-                            : row.final_status === "late"
-                              ? "bg-amber-100 text-amber-800"
-                              : row.final_status === "on leave"
-                                ? "bg-blue-100 text-blue-800"
-                                : row.final_status === "absent"
-                                  ? "bg-rose-100 text-rose-800"
-                                  : "bg-muted text-muted-foreground"
-                        }`}
+            <form onSubmit={handleExplicitMarkAttendance} className="space-y-4">
+              {attStatusMsg && (
+                <div
+                  className={`text-sm p-3 rounded-md ${
+                    attStatusMsg.includes("successfully")
+                      ? "bg-emerald-100 text-emerald-800"
+                      : "bg-destructive/10 text-destructive"
+                  }`}
+                >
+                  {attStatusMsg}
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+                {/* Employee Selection */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold">
+                    Select Employee
+                  </label>
+                  <select
+                    value={attTargetEmployee}
+                    onChange={(e) => setAttTargetEmployee(e.target.value)}
+                    className="w-full border p-2 rounded text-sm bg-background text-foreground"
+                    required
+                  >
+                    <option value="" disabled>
+                      Select worker...
+                    </option>
+                    {employees.map((emp) => (
+                      <option key={emp.id} value={emp.id}>
+                        {emp.full_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Date Input Box */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold">Target Date</label>
+                  <input
+                    type="date"
+                    value={attTargetDate}
+                    onChange={(e) => setAttTargetDate(e.target.value)}
+                    className="border p-2 rounded text-sm bg-background text-foreground w-full"
+                    required
+                  />
+                </div>
+
+                {/* Status Options */}
+                <div className="flex flex-col gap-1.5">
+                  <label className="text-xs font-semibold">
+                    Status Designation
+                  </label>
+                  <select
+                    value={attTargetStatus}
+                    onChange={(e) => setAttTargetStatus(e.target.value as any)}
+                    className="w-full border p-2 rounded text-sm bg-background text-foreground"
+                  >
+                    <option value="present">Present (Standard Hours)</option>
+                    <option value="late">Late Arrival</option>
+                    <option value="absent">Absent</option>
+                  </select>
+                </div>
+
+                {/* Action Submit */}
+                <Button type="submit" className="w-full">
+                  Save Record
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      </section>
+
+      {/* Manual Attendance Override - Calendar View */}
+      <section>
+        <Card className="bg-zinc-950 text-zinc-50 border-zinc-800">
+          <CardHeader>
+            <CardTitle className="text-2xl font-bold tracking-tight">
+              Manual Attendance Override
+            </CardTitle>
+            <CardDescription className="text-zinc-400">
+              Force log an attendance record for any worker on any specified
+              historical or custom date.
+            </CardDescription>
+          </CardHeader>
+
+          <CardContent>
+            {overrideStatusMsg && (
+              <div className="text-sm p-3 mb-6 rounded-md bg-emerald-950 text-emerald-400 border border-emerald-800">
+                {overrideStatusMsg}
+              </div>
+            )}
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 items-start">
+              {/* Left Side: Shadcn Calendar Component */}
+              <div className="bg-zinc-900/50 p-4 rounded-xl border border-zinc-800 flex justify-center">
+                <Calendar
+                  mode="single"
+                  selected={activeCalendarDate}
+                  onSelect={(date) => date && setActiveCalendarDate(date)}
+                  className="rounded-md border border-zinc-800 text-zinc-100"
+                />
+              </div>
+
+              {/* Right Side: Employee Status Table Rows */}
+              <div className="md:col-span-2 space-y-6">
+                <div className="grid grid-cols-2 text-sm font-semibold text-zinc-400 border-b border-zinc-800 pb-2">
+                  <div>Employees (Distinct)</div>
+                  <div>Status Designation</div>
+                </div>
+
+                <div className="space-y-4 max-h-[350px] overflow-y-auto pr-2">
+                  {employees.map((emp) => {
+                    const currentStatus = getStatusForDate(
+                      emp.id,
+                      activeCalendarDate,
+                    );
+
+                    return (
+                      <div
+                        key={emp.id}
+                        className="grid grid-cols-2 items-center text-sm py-2 border-b border-zinc-900"
                       >
-                        {row.final_status}
-                      </span>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                        <div className="font-medium text-zinc-200">
+                          {emp.full_name}
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <span
+                            className={`capitalize font-medium ${
+                              currentStatus === "present"
+                                ? "text-emerald-400"
+                                : currentStatus === "late"
+                                  ? "text-amber-400"
+                                  : "text-rose-400"
+                            }`}
+                          >
+                            {currentStatus}
+                          </span>
+
+                          {/* If they aren't present, show the override button seen in Frame 11938.png */}
+                          {currentStatus !== "present" && (
+                            <Button
+                              size="sm"
+                              variant="secondary"
+                              className="bg-zinc-100 text-zinc-900 hover:bg-zinc-200 text-xs font-medium px-3 h-8 rounded-md transition-colors"
+                              onClick={() =>
+                                handleStatusOverride(
+                                  emp.id,
+                                  activeCalendarDate,
+                                  "present",
+                                )
+                              }
+                            >
+                              Mark Present
+                            </Button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
           </CardContent>
         </Card>
       </section>
@@ -378,9 +627,6 @@ export default function ManagerPage() {
         <Card>
           <CardHeader>
             <CardTitle>Create Shift Templates</CardTitle>
-            <CardDescription>
-              Define standard working hours for your branch
-            </CardDescription>
           </CardHeader>
           <CardContent>
             <form
@@ -429,24 +675,16 @@ export default function ManagerPage() {
         <Card>
           <CardHeader>
             <CardTitle>Onboard New Employee</CardTitle>
-            <CardDescription>
-              Instantly register a new team member to your active branch.
-            </CardDescription>
           </CardHeader>
           <CardContent>
             <form onSubmit={handleAddEmployee} className="space-y-4">
               {addEmpStatusMsg && (
                 <div
-                  className={`text-sm p-3 rounded-md ${
-                    addEmpStatusMsg.includes("successfully")
-                      ? "bg-emerald-100 text-emerald-800"
-                      : "bg-destructive/10 text-destructive"
-                  }`}
+                  className={`text-sm p-3 rounded-md ${addEmpStatusMsg.includes("successfully") ? "bg-emerald-100 text-emerald-800" : "bg-destructive/10 text-destructive"}`}
                 >
                   {addEmpStatusMsg}
                 </div>
               )}
-
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-semibold">Full Name</label>
@@ -459,7 +697,6 @@ export default function ManagerPage() {
                     required
                   />
                 </div>
-
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-semibold">Email Address</label>
                   <input
@@ -471,7 +708,6 @@ export default function ManagerPage() {
                     required
                   />
                 </div>
-
                 <div className="flex flex-col gap-1.5">
                   <label className="text-xs font-semibold">Password</label>
                   <input
@@ -484,10 +720,7 @@ export default function ManagerPage() {
                   />
                 </div>
               </div>
-
-              <Button type="submit" className="w-full md:w-auto">
-                Add Employee Account
-              </Button>
+              <Button type="submit">Add Employee Account</Button>
             </form>
           </CardContent>
         </Card>
@@ -497,8 +730,7 @@ export default function ManagerPage() {
       <section>
         <Card>
           <CardHeader>
-            <CardTitle>SAssign new shift</CardTitle>
-            <CardDescription>Assign new shifts to employees</CardDescription>
+            <CardTitle>Assign new shift</CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex items-center gap-4 bg-muted/40 p-3 rounded-lg max-w-sm">
@@ -513,13 +745,11 @@ export default function ManagerPage() {
                 className="border p-1 rounded text-sm bg-background text-foreground"
               />
             </div>
-
             {assignmentStatus && (
-              <p className="text-xs font-semibold text-emerald-600 dark:text-emerald-400">
+              <p className="text-xs font-semibold text-emerald-600">
                 {assignmentStatus}
               </p>
             )}
-
             <Table>
               <TableHeader>
                 <TableRow>
@@ -555,22 +785,24 @@ export default function ManagerPage() {
               </TableBody>
             </Table>
           </CardContent>
-          
           <CardContent>
             <ul className="divide-y divide-border">
-  {employees.map((e) => (
-    <li key={e.id} className="flex items-center justify-between py-2.5">
-      <span className="text-sm font-medium">{e.full_name}</span>
-      <Button 
-        size="sm" 
-        variant="outline" 
-        onClick={() => processSalary(e.id)}
-      >
-        Calculate Monthly Pay
-      </Button>
-    </li>
-  ))}
-</ul>
+              {employees.map((e) => (
+                <li
+                  key={e.id}
+                  className="flex items-center justify-between py-2.5"
+                >
+                  <span className="text-sm font-medium">{e.full_name}</span>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => processSalary(e.id)}
+                  >
+                    Calculate Monthly Pay
+                  </Button>
+                </li>
+              ))}
+            </ul>
           </CardContent>
         </Card>
       </section>
