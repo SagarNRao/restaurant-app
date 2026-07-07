@@ -77,21 +77,35 @@ export default function ManagerPage() {
     if (profile) loadData(profile.id, profile.branch_id);
   }, [profile]);
 
-  // Helper to look up an employee's status for the dynamically selected date
+  
+
+  // Converts a Date into a local-timezone "YYYY-MM-DD" string, consistently
+  // used both for the calendar selection and for stored attendance rows.
+  function toLocalDateStr(d: Date) {
+    const year = d.getFullYear();
+    const month = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  }
+
+  // Helper to look up an employee's status for the dynamically selected date.
+  // Looks directly at the attendance records loaded for this branch (see
+  // loadData), matching on scheduled_start rather than check_in, since
+  // "absent" records intentionally have a null check_in.
   function getStatusForDate(employeeId: string, targetDate: Date) {
-    const year = targetDate.getFullYear();
-    const month = String(targetDate.getMonth() + 1).padStart(2, "0");
-    const day = String(targetDate.getDate()).padStart(2, "0");
-    const dateStr = `${year}-${month}-${day}`;
+    const dateStr = toLocalDateStr(targetDate);
 
-    // 1. Look into the preloaded roster data first
+    // `roster` is sorted by created_at descending (see loadData), so the
+    // first match is the most recent record for that employee/day.
     const match = roster.find(
-      (r) => r.employee_id === employeeId && r.roster_date === dateStr,
+      (r) =>
+        r.employee_id === employeeId &&
+        r.scheduled_start &&
+        toLocalDateStr(new Date(r.scheduled_start)) === dateStr,
     );
-    if (match) return match.final_status;
+    if (match) return match.status;
 
-    // 2. If it's not found in the limited roster view, let the UI render "Absent"
-    // but we can ensure our upsert logic overwrites it cleanly.
+    // No attendance record exists for this employee on this date at all.
     return "absent";
   }
 
@@ -156,25 +170,44 @@ export default function ManagerPage() {
       shiftTemplates = sData ?? [];
     }
 
-    const [{ data: emp }, { data: leave }, { data: rosterData }] =
-      await Promise.all([
-        supabase.from("profiles").select("*").eq("manager_id", managerId),
-        supabase
-          .from("leave_requests")
-          .select("*")
-          .eq("manager_id", managerId)
-          .order("created_at", { ascending: false }),
-        supabase
-          .from("daily_roster_status")
-          .select("*")
-          .order("roster_date", { ascending: false })
-          .limit(200),
-      ]);
+    const [{ data: emp }, { data: leave }] = await Promise.all([
+      supabase.from("profiles").select("*").eq("manager_id", managerId),
+      supabase
+        .from("leave_requests")
+        .select("*")
+        .eq("manager_id", managerId)
+        .order("created_at", { ascending: false }),
+    ]);
+
+    // Pull real attendance records for this branch directly, instead of the
+    // daily_roster_status view. That view was queried with no branch filter
+    // and a flat limit(200) across the whole table, so on any active system
+    // an employee's row for the date being viewed could easily fall outside
+    // that window — which made getStatusForDate() silently fall back to
+    // "absent" even when a "present" record existed in the attendance table.
+    let attendanceData: any[] = [];
+    if (branchId) {
+      const sinceDate = new Date();
+      sinceDate.setDate(sinceDate.getDate() - 90); // last 90 days is plenty for the calendar view
+
+      const { data: attData, error: attError } = await supabase
+        .from("attendance")
+        .select("employee_id, status, scheduled_start, check_in, created_at")
+        .eq("branch_id", branchId)
+        .gte("scheduled_start", sinceDate.toISOString())
+        .order("created_at", { ascending: false });
+
+      if (attError) {
+        console.error("Failed to load attendance records:", attError.message);
+      } else {
+        attendanceData = attData ?? [];
+      }
+    }
 
     setShifts(shiftTemplates);
     setEmployees(emp ?? []);
     setLeaveRequests(leave ?? []);
-    setRoster(rosterData ?? []);
+    setRoster(attendanceData);
   }
 
   // Allow the manager to force log an employee check-in manually
@@ -272,6 +305,25 @@ export default function ManagerPage() {
       loadData(profile.id, profile.branch_id);
     }
   }
+  async function fetchAttendanceForSelectedDate(targetDate: Date) {
+    const year = targetDate.getFullYear();
+    const month = String(targetDate.getMonth() + 1).padStart(2, "0");
+    const day = String(targetDate.getDate()).padStart(2, "0");
+    const dateStr = `${year}-${month}-${day}`; // Evaluates strictly to "2026-07-05"
+
+    // Cast the timestamp column straight to text and search for the raw date substring
+    const { data, error } = await supabase
+      .from("attendance")
+      .select("employee_id, status")
+      .like("scheduled_start", `${dateStr}%`); // Grabs anything starting with "2026-07-05"
+
+    if (!error && data) {
+      setCalendarDayAttendance(data);
+    } else {
+      setCalendarDayAttendance([]);
+    }
+  }
+
 
   async function handleAddEmployee(e: React.FormEvent) {
     e.preventDefault();
